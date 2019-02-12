@@ -1,6 +1,7 @@
 package nl.xservices.plugins.videocaptureplus;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
@@ -12,6 +13,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
 import android.provider.MediaStore;
+import android.provider.OpenableColumns;
 import android.util.Log;
 import android.Manifest;
 
@@ -29,7 +31,11 @@ import java.io.IOException;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
+import java.util.regex.Pattern;
+import java.util.Collections;
 import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.List;
 
 public class VideoCapturePlus extends CordovaPlugin {
 
@@ -67,11 +73,7 @@ public class VideoCapturePlus extends CordovaPlugin {
       frontcamera = options.optBoolean("frontcamera", false);
     }
 
-    if (action.equals("getFormatData")) {
-      JSONObject obj = getFormatData(args.getString(0), args.getString(1));
-      callbackContext.success(obj);
-      return true;
-    } else if (action.equals("captureVideo")) {
+    if (action.equals("captureVideo")) {
       this.callCaptureVideo(duration, highquality, frontcamera);
     } else {
       return false;
@@ -79,50 +81,7 @@ public class VideoCapturePlus extends CordovaPlugin {
     return true;
   }
 
-  /**
-   * Provides the media data file data depending on it's mime type
-   *
-   * @param filePath path to the file
-   * @param mimeType of the file
-   * @return a MediaFileData object
-   */
-  private JSONObject getFormatData(String filePath, String mimeType) throws JSONException {
-    Uri fileUrl = filePath.startsWith("file:") ? Uri.parse(filePath) : Uri.fromFile(new File(filePath));
-    JSONObject obj = new JSONObject();
-    // setup defaults
-    obj.put("height", 0);
-    obj.put("width", 0);
-    obj.put("bitrate", 0);
-    obj.put("duration", 0);
-    obj.put("codecs", "");
-
-    // If the mimeType isn't set the rest will fail, so let's see if we can determine it.
-    if (mimeType == null || "".equals(mimeType) || "null".equals(mimeType)) {
-      mimeType = FileHelper.getMimeType(fileUrl, cordova);
-    }
-    Log.d(LOG_TAG, "Mime type = " + mimeType);
-
-    if (mimeType.equals(VIDEO_3GPP) || mimeType.equals(VIDEO_MP4)) {
-      obj = getAudioVideoData(filePath, obj);
-    }
-    return obj;
-  }
-
-  private JSONObject getAudioVideoData(String filePath, JSONObject obj) throws JSONException {
-    MediaPlayer player = new MediaPlayer();
-    try {
-      player.setDataSource(filePath);
-      player.prepare();
-      obj.put("duration", player.getDuration() / 1000);
-      obj.put("height", player.getVideoHeight());
-      obj.put("width", player.getVideoWidth());
-    } catch (IOException e) {
-      Log.d(LOG_TAG, "Error: loading video file");
-    }
-    return obj;
-  }
-
-  private String getTempDirectoryPath() {
+  private File getTempDirectory() {
     File cache;
     if (Environment.getExternalStorageState().equals(Environment.MEDIA_MOUNTED)) {
       // SD card
@@ -133,7 +92,54 @@ public class VideoCapturePlus extends CordovaPlugin {
     }
     // Create the cache directory if it doesn't exist
     cache.mkdirs();
-    return cache.getAbsolutePath();
+    return cache;
+  }
+
+  private File getTempFile() {
+    return getTempFile(false);
+  }
+
+  private File getTempFile(boolean reuseLastFile) {
+    File tempDir = getTempDirectory();
+    List<File> rawTempDirFiles = Arrays.asList(tempDir.listFiles());
+    List<File> tempDirFiles = new ArrayList<File>();
+
+    FileNameComparator fnc = new FileNameComparator();
+    Collections.sort(rawTempDirFiles, fnc);
+
+    for(int i = 0; i < rawTempDirFiles.size(); i++) {
+      String tempDirFileName = rawTempDirFiles.get(i).getName().toLowerCase();
+      if (Pattern.matches("^videocaptureplus\\d{10}\\.mp4$", tempDirFileName)) {
+        tempDirFiles.add(rawTempDirFiles.get(i));
+      }
+    }
+
+    if (reuseLastFile) {
+      if (tempDirFiles.size() > 0) {
+        return tempDirFiles.get(tempDirFiles.size() - 1);
+      }
+      else {
+        return null;
+      }
+    }
+    else {
+      int sequenceNumber;
+      if (tempDirFiles.size() > 0) {
+        sequenceNumber = Integer.parseInt(tempDirFiles.get(tempDirFiles.size() - 1).getName().substring(16, 26)) + 1;
+      }
+      else {
+        sequenceNumber = 1;
+      }
+      File tempFile = new File(tempDir, "VideoCapturePlus" + String.format("%010d", sequenceNumber) + ".mp4");
+      try {
+        tempFile.createNewFile();
+      }
+      catch(IOException err) {
+        this.fail(createErrorObject(CAPTURE_NO_MEDIA_FILES, "Error: unable to create temporary file"));
+        return null;
+      }
+      return tempFile;
+    }
   }
 
   /**
@@ -179,7 +185,7 @@ public class VideoCapturePlus extends CordovaPlugin {
 
   private void captureVideo(int duration, boolean highquality, boolean frontcamera) {
     Intent intent = new Intent(android.provider.MediaStore.ACTION_VIDEO_CAPTURE);
-    String videoUri = getVideoContentUriFromFilePath(this.cordova.getActivity(), getTempDirectoryPath());
+    Uri videoUri = getUriByFile(cordova.getActivity(), getTempFile());
     intent.putExtra(MediaStore.EXTRA_OUTPUT, videoUri);
 
     if (highquality) {
@@ -190,7 +196,12 @@ public class VideoCapturePlus extends CordovaPlugin {
     }
 
     if (frontcamera) {
-      intent.putExtra("android.intent.extras.CAMERA_FACING", android.hardware.Camera.CameraInfo.CAMERA_FACING_FRONT);
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+        intent.putExtra("android.intent.extras.LENS_FACING_FRONT", 1);
+      }
+      else {
+        intent.putExtra("android.intent.extras.CAMERA_FACING", android.hardware.Camera.CameraInfo.CAMERA_FACING_FRONT);
+      }
     }
 
     // consider adding an allowflash param, setting Camera.Parameters.FLASH_MODE_ON/OFF/AUTO
@@ -202,10 +213,17 @@ public class VideoCapturePlus extends CordovaPlugin {
     this.cordova.startActivityForResult(this, intent, CAPTURE_VIDEO);
   }
 
-  public static String getVideoContentUriFromFilePath(Context ctx, String filePath) {
+  private static Uri getUriByPath(Context ctx, String path) {
+    return getUriByFile(ctx, new File(path));
+  }
+
+  private static Uri getUriByFile(Context ctx, File file) {
+    return FileProvider.getUriForFile(ctx, "cordova-plugin-video-capture-plus.provider", file);
+  }
+
+  public static Uri getVideoContentUriFromFilePath(Context ctx, String filePath) {
 
     ContentResolver contentResolver = ctx.getContentResolver();
-    String videoUriStr = null;
 
     // This returns us content://media/external/videos/media (or something like that)
     // I pass in "external" because that's the MediaStore's name for the external
@@ -222,8 +240,12 @@ public class VideoCapturePlus extends CordovaPlugin {
       videoId = cursor.getLong(columnIndex);
     }
     cursor.close();
-    if (videoId != -1) videoUriStr = videosUri.toString() + "/" + videoId;
-    return videoUriStr;
+
+    if (videoId != -1) {
+      return getUriByPath(ctx, videosUri.toString() + "/" + videoId);
+    }
+
+    return null;
   }
 
   /**
@@ -268,8 +290,7 @@ public class VideoCapturePlus extends CordovaPlugin {
         }
 
         if (data == null) {
-          File movie = new File(getTempDirectoryPath(), "VideoCapturePlus.avi");
-          data = Uri.fromFile(movie);
+          data = getUriByFile(cordova.getActivity(), getTempFile(true));
         }
 
         // create a file object from the uri
@@ -306,38 +327,39 @@ public class VideoCapturePlus extends CordovaPlugin {
   private JSONObject createMediaFile(final Uri data) {
     Future<JSONObject> result = cordova.getThreadPool().submit(new Callable<JSONObject>() {
       @Override
-      public JSONObject call() throws Exception {
-        File fp = webView.getResourceApi().mapUriToFile(data);
+      public JSONObject call() throws JSONException {
         JSONObject obj = new JSONObject();
-        try {
-          // File properties
-          obj.put("name", fp.getName());
-          obj.put("fullPath", fp.toURI().toString());
-          // Because of an issue with MimeTypeMap.getMimeTypeFromExtension() all .3gpp files
-          // are reported as video/3gpp. I'm doing this hacky check of the URI to see if it
-          // is stored in the audio or video content store.
-          if (fp.getAbsoluteFile().toString().endsWith(".3gp") || fp.getAbsoluteFile().toString().endsWith(".3gpp")) {
-            obj.put("type", VIDEO_3GPP);
-          } else {
-            obj.put("type", FileHelper.getMimeType(Uri.fromFile(fp), cordova));
-          }
-          obj.put("lastModifiedDate", fp.lastModified());
-          obj.put("size", fp.length());
-        } catch (JSONException e) {
-          // this will never happen
-          e.printStackTrace();
+        obj.put("fullPath", data.toString());
+
+        // Get file name and size
+        Cursor cursor = cordova.getActivity().getContentResolver().query(data, null, null, null, null);
+        if (cursor.getCount() > 0) {
+          int nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+          int sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE);
+          cursor.moveToFirst();
+          obj.put("fileName", cursor.getString(nameIndex));
+          obj.put("size", cursor.getLong(sizeIndex));
         }
+        else {
+          // Couldn't read cursor, set defaults
+          obj.put("fileName", "");
+          obj.put("size", -1);
+        }
+
         return obj;
       }
     });
     try {
       return result.get();
-    } catch (InterruptedException e) {
-      e.printStackTrace();
-    } catch (ExecutionException e) {
-      e.printStackTrace();
     }
-    return null;
+    catch (InterruptedException e) {
+      this.fail(createErrorObject(CAPTURE_NO_MEDIA_FILES, "Error getting media creation result: " + e.getMessage()));
+      return null;
+    }
+    catch (ExecutionException e) {
+      this.fail(createErrorObject(CAPTURE_NO_MEDIA_FILES, "Error getting media creation result: " + e.getMessage()));
+      return null;
+    }
   }
 
   private JSONObject createErrorObject(int code, String message) {

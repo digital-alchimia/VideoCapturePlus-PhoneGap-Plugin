@@ -351,7 +351,7 @@
     NSMutableDictionary* fileDict = [NSMutableDictionary dictionaryWithCapacity:5];
     
     [fileDict setObject:[fullPath lastPathComponent] forKey:@"name"];
-    [fileDict setObject:fullPath forKey:@"fullPath"];
+    [fileDict setObject:[@"file://" stringByAppendingString:fullPath] forKey:@"fullPath"];
     // determine type
     if (!type) {
         NSString* mimeType = [self getMimeTypeFromFullPath:fullPath];
